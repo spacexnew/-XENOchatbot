@@ -1,67 +1,101 @@
-import os
+import hashlib
+import io
+
 import streamlit as st
+import groq
 from groq import Groq
 from gtts import gTTS
 
-st.set_page_config(page_title="XENO Groq Voice Bot", layout="centered")
-st.title("⚡ XENO: Fast Groq Voice Assistant")
+# ---------- Page setup ----------
+st.set_page_config(page_title="Xeno Voice Bot", page_icon="🎙️")
+st.title("🎙️ Xeno - Voice Assistant")
+st.caption("Click the mic, speak, then click stop. Xeno will answer out loud.")
 
-# 1. Grab your Groq API Key securely from secrets
-groq_key = st.secrets["GROQ_API_KEY"]
-client = Groq(api_key=groq_key)
+CHAT_MODEL = "llama-3.3-70b-versatile"
+STT_MODEL = "whisper-large-v3-turbo"
+TTS_LANG = "en"  # change to "ur" for Urdu, "de" for German, etc.
+SYSTEM_PROMPT = (
+    "You are Xeno, a friendly voice assistant. Your replies are read aloud, "
+    "so keep them short (1-3 sentences), natural, and do not use markdown, "
+    "bullet points, or emojis."
+)
 
-# 2. STRICTLY FORCE MEMORY TO RESET FOR XENO (Fixes the "Amy" name bug)
-if "messages" not in st.session_state or len(st.session_state.messages) <= 1:
-    st.session_state.messages = [
-        {
-            "role": "system", 
-            "content": "Your name is XENO. You are a lightning-fast, helpful voice work assistant. Never call yourself Amy. Always refer to yourself as XENO. Keep responses brief and friendly."
-        }
-    ]
+# ---------- Groq client ----------
+if "GROQ_API_KEY" not in st.secrets:
+    st.error("Missing GROQ_API_KEY. Add it in App settings -> Secrets.")
+    st.stop()
 
-# Display historical conversation bubbles
-for message in st.session_state.messages:
-    if message["role"] != "system":
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-# 3. VOICE INPUT: Record speech using your phone or computer mic
-audio_value = st.audio_input("Tap to record your voice for XENO")
+# ---------- Session state ----------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "last_audio_id" not in st.session_state:
+    st.session_state.last_audio_id = None
+if "reply_audio" not in st.session_state:
+    st.session_state.reply_audio = None
 
-if audio_value:
-    # Save the recorded audio byte stream to a file
-    with open("temp_audio.wav", "wb") as f:
-        f.write(audio_value.read())
-        
-    with st.spinner("XENO is listening..."):
-        # SPEECH-TO-TEXT: Transcribe voice using Groq's Whisper engine
-        with open("temp_audio.wav", "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo", 
-                file=audio_file
-            )
-        user_text = transcription.text
+with st.sidebar:
+    st.header("Xeno")
+    if st.button("Clear conversation"):
+        st.session_state.messages = []
+        st.session_state.reply_audio = None
+        st.session_state.last_audio_id = None
+        st.rerun()
 
-    # Show what you said on screen
-    with st.chat_message("user"):
-        st.markdown(user_text)
-    st.session_state.messages.append({"role": "user", "content": user_text})
+# ---------- Voice input ----------
+audio = st.audio_input("🎤 Speak to Xeno")
 
-    # 4. CHAT COMPLETION: Clean, corrected message payload to avoid BadRequestError
-    with st.chat_message("assistant"):
-        with st.spinner("XENO is typing..."):
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-specdec", 
-                messages=[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]
-            )
-            answer = response.choices.message.content
-            st.markdown(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-        
-        # 5. TEXT-TO-SPEECH: Make XENO talk back using free gTTS
-        with st.spinner("XENO is vocalizing..."):
-            tts = gTTS(text=answer, lang='en', tld='com')
-            tts.save("xeno_reply.mp3")
-            
-            # Autoplay audio directly through your mobile or desktop speaker
-            st.audio("xeno_reply.mp3", autoplay=True)
+if audio is not None:
+    audio_bytes = audio.getvalue()
+    audio_id = hashlib.md5(audio_bytes).hexdigest()
+
+    # Only process each recording once
+    if audio_id != st.session_state.last_audio_id:
+        st.session_state.last_audio_id = audio_id
+        try:
+            # 1) Speech -> text
+            with st.spinner("Listening..."):
+                transcript = client.audio.transcriptions.create(
+                    file=("speech.wav", audio_bytes),
+                    model=STT_MODEL,
+                )
+            user_text = transcript.text.strip()
+
+            if user_text:
+                st.session_state.messages.append({"role": "user", "content": user_text})
+
+                # 2) Text -> AI reply
+                api_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + [
+                    {"role": m["role"], "content": m["content"]}
+                    for m in st.session_state.messages
+                ]
+                with st.spinner("Thinking..."):
+                    response = client.chat.completions.create(
+                        model=CHAT_MODEL,
+                        messages=api_messages,
+                    )
+                reply = response.choices[0].message.content
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+
+                # 3) Reply text -> speech
+                with st.spinner("Speaking..."):
+                    mp3 = io.BytesIO()
+                    gTTS(text=reply, lang=TTS_LANG).write_to_fp(mp3)
+                    st.session_state.reply_audio = mp3.getvalue()
+            else:
+                st.warning("I couldn't hear anything. Please try again.")
+
+        except groq.APIStatusError as e:
+            st.error(f"Groq error {e.status_code}: {e.response.text}")
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
+
+# ---------- Play the latest reply ----------
+if st.session_state.reply_audio:
+    st.audio(st.session_state.reply_audio, format="audio/mp3", autoplay=True)
+
+# ---------- Transcript ----------
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
