@@ -11,8 +11,9 @@ st.set_page_config(page_title="Xeno Voice Bot", page_icon="🎙️")
 st.title("🎙️ Xeno - Voice Assistant")
 st.caption("Click the mic, speak, then click stop. Xeno will answer out loud.")
 
-CHAT_MODEL = "llama-3.3-70b-versatile"
-STT_MODEL = "whisper-large-v3-turbo"
+# Models are tried in order; if one is retired, the next is used automatically
+CHAT_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+STT_MODELS = ["whisper-large-v3", "whisper-large-v3-turbo"]
 TTS_LANG = "en"  # change to "ur" for Urdu, "de" for German, etc.
 SYSTEM_PROMPT = (
     "You are Xeno, a friendly voice assistant. Your replies are read aloud, "
@@ -26,6 +27,22 @@ if "GROQ_API_KEY" not in st.secrets:
     st.stop()
 
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+
+
+def call_with_fallback(models, fn):
+    """Run fn(model) for each model until one works."""
+    last_error = None
+    for model in models:
+        try:
+            return fn(model)
+        except groq.APIStatusError as e:
+            if e.status_code in (400, 404):  # model missing/retired -> try next
+                last_error = e
+                continue
+            raise
+    raise last_error
+
 
 # ---------- Session state ----------
 if "messages" not in st.session_state:
@@ -56,9 +73,11 @@ if audio is not None:
         try:
             # 1) Speech -> text
             with st.spinner("Listening..."):
-                transcript = client.audio.transcriptions.create(
-                    file=("speech.wav", audio_bytes),
-                    model=STT_MODEL,
+                transcript = call_with_fallback(
+                    STT_MODELS,
+                    lambda m: client.audio.transcriptions.create(
+                        file=("speech.wav", audio_bytes), model=m
+                    ),
                 )
             user_text = transcript.text.strip()
 
@@ -71,9 +90,11 @@ if audio is not None:
                     for m in st.session_state.messages
                 ]
                 with st.spinner("Thinking..."):
-                    response = client.chat.completions.create(
-                        model=CHAT_MODEL,
-                        messages=api_messages,
+                    response = call_with_fallback(
+                        CHAT_MODELS,
+                        lambda m: client.chat.completions.create(
+                            model=m, messages=api_messages
+                        ),
                     )
                 reply = response.choices[0].message.content
                 st.session_state.messages.append({"role": "assistant", "content": reply})
