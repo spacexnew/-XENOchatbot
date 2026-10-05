@@ -47,10 +47,12 @@ if audio_value:
     # 4. CHAT COMPLETION: Generate XENO's brain response via Llama 3
     with st.chat_message("assistant"):
         with st.spinner("XENO is typing..."):
+                        # Generate XENO's intelligence response via Llama 3
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile", # Groq's high-intelligence free model
+                model="llama-3.3-70b-specdec", 
                 messages=st.session_state.messages
             )
+
             answer = response.choices[0].message.content
             st.markdown(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
